@@ -14,19 +14,56 @@ from email.utils import formataddr
 from datetime import datetime, timedelta, timezone
 
 FEEDS = {
+    # ===== アドテク専門 =====
     "AdExchanger": "https://www.adexchanger.com/feed/",
     "Digiday": "https://digiday.com/feed/",
-    "Search Engine Land": "https://searchengineland.com/feed",
+    "AdMonsters": "https://www.admonsters.com/feed/",
+    "ExchangeWire": "https://www.exchangewire.com/feed/",
+    "Adweek": "https://www.adweek.com/feed/",
     "MarTech": "https://martech.org/feed/",
-    "The Drum": "https://www.thedrum.com/rss.xml",
     "Marketing Dive": "https://www.marketingdive.com/feeds/news/",
+    "Mobile Dev Memo": "https://mobiledevmemo.com/feed/",
+
+    # ===== 業界ニュース全般 =====
+    "The Drum": "https://www.thedrum.com/rss.xml",
+    "Campaign US": "https://www.campaignlive.com/rss/campaignus",
+    "Marketing Brew": "https://www.marketingbrew.com/feed",
+    "Ad Age": "https://adage.com/rss/latest-news",
+    "MediaPost Online Media": "https://feeds.mediapost.com/online-media-daily",
+    "MediaPost RTD": "https://feeds.mediapost.com/real-time-daily",
+
+    # ===== 検索・プラットフォーム =====
+    "Search Engine Land": "https://searchengineland.com/feed",
+    "Search Engine Journal": "https://www.searchenginejournal.com/feed/",
+    "Search Engine Roundtable": "https://www.seroundtable.com/index.rdf",
+
+    # ===== CTV・動画 =====
+    "StreamTV Insider": "https://www.streamtvinsider.com/rss/xml",
+    "TVREV": "https://www.tvrev.com/news?format=rss",
+
+    # ===== プライバシー =====
+    "IAPP": "https://iapp.org/feed/",
+
+    # ===== テック大手 =====
+    "TechCrunch": "https://techcrunch.com/feed/",
+    "The Verge": "https://www.theverge.com/rss/index.xml",
+
+    # ===== 国内 =====
     "ExchangeWire JP": "https://www.exchangewire.jp/feed/",
     "MarkeZine": "https://markezine.jp/rss/new/20/index.xml",
+    "Web担当者Forum": "https://webtan.impress.co.jp/rss.xml",
+    "AdverTimes": "https://www.advertimes.com/feed/",
+    "DIGIDAY JP": "https://digiday.jp/feed/",
+    "Media Innovation": "https://media-innovation.jp/feed/",
+    "ITmedia マーケティング": "https://rss.itmedia.co.jp/rss/2.0/marketing.xml",
+    "アタラ unyoo.jp": "https://www.atara.co.jp/unyoojp/feed/",
+
 }
 
-MAX_PER_FEED = 6
-HOURS_BACK = 48
-MAX_ARTICLES_IN_MAIL = 8
+MAX_PER_FEED = 4
+HOURS_BACK = 30
+MAX_ARTICLES_IN_MAIL = 10
+MAX_TOTAL_ARTICLES = 90
 MAX_FEEDBACK_ROWS = 60
 JST = timezone(timedelta(hours=9))
 
@@ -37,8 +74,13 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
 EXCLUDE_KEYWORDS = [
-    "hires", "promotes", "appoints", "joins", "names ",
+    "hires", "promotes", "appoints", "joins ", "names ", "steps down",
+    "departs", "new ceo", "new cmo", "leadership change",
     "award", "webinar", "podcast", "sponsored",
+    "register now", "join us", "upcoming event",
+    "opinion:", "op-ed", "guest post", "q&a with",
+    "photos:", "watch:", "listen:",
+    "セミナー", "ウェビナー", "イベント開催", "登壇", "人事", "役員異動",
 ]
 
 
@@ -48,8 +90,9 @@ def fetch_feed(url):
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
+        "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
     })
-    with urllib.request.urlopen(req, timeout=30) as res:
+    with urllib.request.urlopen(req, timeout=25) as res:
         return feedparser.parse(res.read())
 
 
@@ -58,9 +101,18 @@ def is_excluded(title):
     return any(k in low for k in EXCLUDE_KEYWORDS)
 
 
+def clean_html(text):
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"&\w+;", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def fetch_articles():
     cutoff = datetime.now(timezone.utc) - timedelta(hours=HOURS_BACK)
     articles = []
+    seen_titles = set()
+    ok_count = 0
+
     for name, url in FEEDS.items():
         try:
             feed = fetch_feed(url)
@@ -69,28 +121,64 @@ def fetch_articles():
             for entry in feed.entries:
                 if count >= MAX_PER_FEED:
                     break
-                title = entry.get("title", "")
+                title = entry.get("title", "").strip()
                 if not title or is_excluded(title):
                     continue
+
+                # 重複排除（先頭50文字で判定）
+                key = title.lower()[:50]
+                if key in seen_titles:
+                    continue
+
                 pub = entry.get("published_parsed") or entry.get("updated_parsed")
                 if pub:
                     dt = datetime(*pub[:6], tzinfo=timezone.utc)
                     if dt < cutoff:
                         continue
+
+                seen_titles.add(key)
                 articles.append({
                     "source": name,
                     "title": title,
                     "link": entry.get("link", ""),
-                    "summary": re.sub(r"<[^>]+>", "", entry.get("summary", ""))[:500],
+                    "summary": clean_html(entry.get("summary", ""))[:400],
                 })
                 count += 1
-            print(f"[OK] {name}: 採用{count}件 / フィード内{total}件")
+            print(f"[OK] {name}: 採用{count} / 全{total}")
+            ok_count += 1
         except Exception as e:
-            print(f"[WARN] {name}: {type(e).__name__} {e}")
+            print(f"[NG] {name}: {type(e).__name__}")
+
+    print(f"[INFO] フィード成功: {ok_count}/{len(FEEDS)}")
     return articles
 
 
-# ========== フィードバック読み込み ==========
+def cap_articles(articles, limit=MAX_TOTAL_ARTICLES):
+    """媒体ごとに均等に間引く"""
+    if len(articles) <= limit:
+        return articles
+
+    by_source = {}
+    for a in articles:
+        by_source.setdefault(a["source"], []).append(a)
+
+    result = []
+    idx = 0
+    while len(result) < limit:
+        added = False
+        for src in by_source:
+            if idx < len(by_source[src]) and len(result) < limit:
+                result.append(by_source[src][idx])
+                added = True
+        if not added:
+            break
+        idx += 1
+
+    print(f"[INFO] {len(articles)}件 → {len(result)}件に絞込")
+    return result
+
+
+# ========== フィードバック ==========
 
 def load_feedback():
     url = os.environ.get("FEEDBACK_CSV_URL")
@@ -104,11 +192,9 @@ def load_feedback():
         res.encoding = "utf-8"
         rows = list(csv.reader(io.StringIO(res.text)))
         if len(rows) < 2:
-            print("[INFO] フィードバックなし")
             return [], []
 
         good, bad = [], []
-        # 列構成: [0]タイムスタンプ [1]タイトル [2]評価 [3]理由
         for row in rows[1:][-MAX_FEEDBACK_ROWS:]:
             if len(row) < 3:
                 continue
@@ -120,32 +206,28 @@ def load_feedback():
             if "good" in rating:
                 good.append(title)
             elif "bad" in rating:
-                bad.append(f"{title}" + (f" ／ 理由: {reason}" if reason else ""))
+                bad.append(title + (f" ／ 理由: {reason}" if reason else ""))
 
-        print(f"[OK] フィードバック: GOOD {len(good)}件 / BAD {len(bad)}件")
+        print(f"[OK] FB: GOOD {len(good)} / BAD {len(bad)}")
         return good, bad
     except Exception as e:
-        print(f"[WARN] フィードバック読込失敗: {type(e).__name__} {e}")
+        print(f"[WARN] FB読込失敗: {type(e).__name__}")
         return [], []
 
 
 def build_preference_block(good, bad):
     if not good and not bad:
         return ""
-
-    parts = ["\n# 読者の過去の評価（最優先で考慮すること）\n"]
+    parts = ["\n# 読者の過去の評価（最優先で考慮）\n"]
     if good:
-        parts.append("## 高評価だった記事の例")
+        parts.append("## 高評価だった記事")
         parts.extend(f"- {g}" for g in good[-20:])
         parts.append("")
     if bad:
-        parts.append("## 低評価だった記事の例（理由付き）")
+        parts.append("## 低評価だった記事（理由付き）")
         parts.extend(f"- {b}" for b in bad[-20:])
         parts.append("")
-    parts.append(
-        "上記から読者の関心領域と不要な話題の傾向を推論し、"
-        "低評価に類似する記事は選定から除外すること。\n"
-    )
+    parts.append("上記から関心領域を推論し、低評価に類似する記事は除外すること。\n")
     return "\n".join(parts)
 
 
@@ -171,14 +253,17 @@ def call_groq(prompt):
                             {"role": "user", "content": prompt},
                         ],
                         "temperature": 0.3,
-                        "max_tokens": 4000,
+                        "max_tokens": 5000,
                     },
-                    timeout=120,
+                    timeout=150,
                 )
                 if res.status_code == 429:
-                    print(f"[WARN] {model} レート制限。20秒待機")
-                    time.sleep(20)
+                    print(f"[WARN] {model} レート制限。25秒待機")
+                    time.sleep(25)
                     continue
+                if res.status_code == 413:
+                    print(f"[WARN] {model} 入力過大")
+                    break
                 res.raise_for_status()
                 print(f"[OK] 要約成功: {model}")
                 return res.json()["choices"][0]["message"]["content"]
@@ -186,7 +271,7 @@ def call_groq(prompt):
                 last_error = e
                 print(f"[WARN] {model} 試行{attempt+1}: {type(e).__name__}")
                 time.sleep(5)
-    raise RuntimeError(f"全モデルで失敗: {last_error}")
+    raise RuntimeError(f"全モデル失敗: {last_error}")
 
 
 def select_and_summarize(articles, preference):
@@ -195,11 +280,11 @@ def select_and_summarize(articles, preference):
         for i, a in enumerate(articles)
     )
 
-    prompt = f"""以下はアドテク業界の最新記事一覧です。
-広告事業に関わる日本のビジネスパーソン向けに、重要度が高いものを最大{MAX_ARTICLES_IN_MAIL}件選び、日本語で要約してください。
+    prompt = f"""以下はアドテク・デジタルマーケティング業界の最新記事一覧です。
+日本の広告事業従事者向けに、重要度が高いものを最大{MAX_ARTICLES_IN_MAIL}件選び、日本語で要約してください。
 {preference}
-# 出力形式（厳守。マークダウン記法は使用禁止）
-選んだ記事ごとに、以下のブロックを繰り返してください。
+# 出力形式（厳守。マークダウン記法は禁止）
+選んだ記事ごとに以下を繰り返す。
 
 @@@ID:元記事のID番号@@@
 ━━━━━━━━━━━━━━━━━━━━
@@ -215,14 +300,15 @@ def select_and_summarize(articles, preference):
 URL
 
 
-# 重要な制約
-- 冒頭の @@@ID:数字@@@ は必ず出力すること（システムが使用します）
-- IDは記事一覧に記載された正確な番号を使うこと
-- プライバシー規制、Cookie、CTV、リテールメディア、AI活用、M&A、大手プラットフォーム動向を優先
-- 製品宣伝、人事異動、イベント告知は除外
-- 専門用語は原語のまま（SSP, DSP, PMP など）
-- アスタリスクやシャープなどの装飾記号は使わない
-- 説明文や前置きは一切書かず、上記ブロックのみ出力すること
+# 制約
+- 冒頭の @@@ID:数字@@@ は必須（システムが使用）
+- IDは記事一覧の正確な番号を使うこと
+- 優先: プライバシー規制、Cookie、CTV、リテールメディア、AI活用、M&A、大手プラットフォーム動向、計測技術
+- 除外: 製品宣伝、人事、イベント告知、単発キャンペーン事例
+- 専門用語は原語のまま（SSP, DSP, PMP, CDP など）
+- 同一の出来事を複数媒体が報じている場合は1件にまとめる
+- 装飾記号（*, #）は使わない
+- 前置きや説明文は書かず、ブロックのみ出力
 
 # 記事一覧
 {indexed}
@@ -241,27 +327,26 @@ def parse_selected_ids(text, total):
 
 # ========== 評価リンク ==========
 
-def build_rating_section(selected_articles):
+def build_rating_section(selected):
     base = os.environ.get("FORM_BASE_URL")
     e_title = os.environ.get("FORM_ENTRY_TITLE")
     e_rating = os.environ.get("FORM_ENTRY_RATING")
 
     if not all([base, e_title, e_rating]):
-        print("[INFO] フォーム設定が未完了のため評価リンクをスキップ")
         return ""
 
     lines = [
         "\n\n",
         "════════════════════════════════════",
-        "  この配信の精度を上げるためのご協力",
+        "  配信精度向上へのご協力のお願い",
         "════════════════════════════════════",
         "",
-        "GOOD → クリックして送信ボタンを押すだけ（入力不要）",
-        "BAD  → クリック後、理由を一言だけご記入ください",
+        "GOOD → クリックして送信を押すだけ（入力不要）",
+        "BAD  → クリック後、理由を一言ご記入ください",
         "",
     ]
 
-    for n, a in enumerate(selected_articles, 1):
+    for n, a in enumerate(selected, 1):
         title = a["title"][:180]
         q = urllib.parse.quote(title, safe="")
         lines.append(f"{n}. {title}")
@@ -275,8 +360,8 @@ def build_rating_section(selected_articles):
 # ========== メール ==========
 
 def build_fallback(articles):
-    lines = ["※AI要約に失敗したため、記事一覧のみお送りします。\n"]
-    for i, a in enumerate(articles[:15], 1):
+    lines = ["※AI要約に失敗したため記事一覧のみ送信します。\n"]
+    for i, a in enumerate(articles[:20], 1):
         lines.append(f"{i}. [{a['source']}] {a['title']}\n   {a['link']}\n")
     return "\n".join(lines)
 
@@ -305,12 +390,13 @@ def send_mail(text):
 
 if __name__ == "__main__":
     arts = fetch_articles()
-    print(f"合計取得記事数: {len(arts)}")
+    print(f"取得記事数: {len(arts)}")
 
     if not arts:
         send_mail("本日は対象期間内の新着記事がありませんでした。")
         raise SystemExit
 
+    arts = cap_articles(arts)
     good, bad = load_feedback()
     pref = build_preference_block(good, bad)
 
@@ -319,10 +405,10 @@ if __name__ == "__main__":
         ids = parse_selected_ids(raw, len(arts))
         selected = [arts[i] for i in ids]
         body = re.sub(r"@@@ID:\d+@@@\s*", "", raw)
-        print(f"[OK] 選定記事数: {len(selected)}")
+        print(f"[OK] 選定: {len(selected)}件")
 
         if not selected:
-            print("[WARN] ID抽出失敗。上位記事を評価対象にします")
+            print("[WARN] ID抽出失敗")
             selected = arts[:MAX_ARTICLES_IN_MAIL]
 
         body += build_rating_section(selected)
