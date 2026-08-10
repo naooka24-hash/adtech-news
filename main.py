@@ -1,9 +1,10 @@
 import os
 import time
+import json
 import smtplib
 import urllib.request
 import feedparser
-import google.generativeai as genai
+import requests
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
@@ -15,6 +16,7 @@ FEEDS = {
     "Search Engine Land": "https://searchengineland.com/feed",
     "MarTech": "https://martech.org/feed/",
     "The Drum": "https://www.thedrum.com/rss.xml",
+    "Marketing Dive": "https://www.marketingdive.com/feeds/news/",
     "ExchangeWire JP": "https://www.exchangewire.jp/feed/",
     "MarkeZine": "https://markezine.jp/rss/new/20/index.xml",
 }
@@ -26,9 +28,14 @@ JST = timezone(timedelta(hours=9))
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+]
+
 
 def fetch_feed(url):
-    """User-Agentを付けてRSSを取得"""
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
@@ -57,7 +64,7 @@ def fetch_articles():
                     "source": name,
                     "title": entry.get("title", ""),
                     "link": entry.get("link", ""),
-                    "summary": entry.get("summary", "")[:600],
+                    "summary": entry.get("summary", "")[:500],
                 })
                 count += 1
             print(f"[OK] {name}: 採用{count}件 / フィード内{total}件")
@@ -67,7 +74,7 @@ def fetch_articles():
 
 
 def summarize(articles):
-    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    api_key = os.environ["GROQ_API_KEY"]
 
     body = "\n\n".join(
         f"[{a['source']}] {a['title']}\nURL: {a['link']}\n{a['summary']}"
@@ -75,9 +82,9 @@ def summarize(articles):
     )
 
     prompt = f"""以下はアドテク業界の最新記事一覧です。
-広告事業に関わるビジネスパーソン向けに、重要度の高いものを最大8件選び、日本語で要約してください。
+広告事業に関わる日本のビジネスパーソン向けに、重要度の高いものを最大8件選び、日本語で要約してください。
 
-# 出力形式（プレーンテキスト。装飾記号は使わない）
+# 出力形式（プレーンテキスト。マークダウン記法は禁止）
 ━━━━━━━━━━━━━━━━━━━━
 1. 日本語の見出し
 ━━━━━━━━━━━━━━━━━━━━
@@ -90,43 +97,58 @@ def summarize(articles):
 【出典】媒体名
 URL
 
+
 # 選定ルール
 - プライバシー規制、Cookie、CTV、リテールメディア、AI活用、M&A、大手プラットフォーム動向を優先
 - 単なる製品宣伝、人事異動、イベント告知は除外
 - 専門用語は原語のまま（SSP, DSP, PMP など）
-- マークダウン記法（**や##）は使わない
+- 必ず日本語で出力すること
+- アスタリスクやシャープなどの装飾記号は使わない
 
 # 記事一覧
 {body}
 """
 
-    models_to_try = ["gemini-2.0-flash", "gemini-flash-latest", "gemini-2.5-flash"]
     last_error = None
-
-    for model_name in models_to_try:
+    for model in GROQ_MODELS:
         for attempt in range(3):
             try:
-                model = genai.GenerativeModel(model_name)
-                res = model.generate_content(prompt)
-                print(f"[OK] 要約成功: {model_name}")
-                return res.text
+                res = requests.post(
+                    GROQ_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system",
+                             "content": "あなたは日本の広告業界に詳しいアナリストです。必ず日本語で回答します。"},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 4000,
+                    },
+                    timeout=120,
+                )
+                if res.status_code == 429:
+                    print(f"[WARN] {model} レート制限。20秒待機")
+                    time.sleep(20)
+                    continue
+                res.raise_for_status()
+                text = res.json()["choices"][0]["message"]["content"]
+                print(f"[OK] 要約成功: {model}")
+                return text
             except Exception as e:
                 last_error = e
-                msg = str(e)
-                print(f"[WARN] {model_name} 試行{attempt+1}: {type(e).__name__}")
-                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-                    if "limit: 0" in msg:
-                        break  # 枠自体がない → 次のモデルへ
-                    time.sleep(65)
-                    continue
-                break  # その他のエラーは次のモデルへ
+                print(f"[WARN] {model} 試行{attempt+1}: {type(e).__name__} {e}")
+                time.sleep(5)
 
     raise RuntimeError(f"全モデルで失敗: {last_error}")
 
 
 def build_fallback(articles):
-    """要約失敗時: 記事リストだけ送る"""
-    lines = ["※AI要約に失敗したため、記事一覧のみ送信します。\n"]
+    lines = ["※AI要約に失敗したため、記事一覧のみお送りします。\n"]
     for i, a in enumerate(articles, 1):
         lines.append(f"{i}. [{a['source']}] {a['title']}\n   {a['link']}\n")
     return "\n".join(lines)
@@ -149,7 +171,7 @@ def send_mail(text):
         server.login(gmail_user, gmail_pass)
         server.send_message(msg)
 
-    print(f"[OK] メール送信完了: {mail_to}")
+    print(f"[OK] メール送信完了")
 
 
 if __name__ == "__main__":
