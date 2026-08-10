@@ -48,7 +48,7 @@ MAX_PER_FEED = 5
 HOURS_BACK = 30
 MAX_ARTICLES_IN_MAIL = 8
 MAX_TOTAL_ARTICLES = 80
-MAX_FEEDBACK_ROWS = 60
+MAX_FEEDBACK_ROWS = 200
 JST = timezone(timedelta(hours=9))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -92,6 +92,27 @@ def normalize_url(url):
         return (p.netloc + p.path).rstrip("/").lower()
     except Exception:
         return url.lower()
+
+
+# ========== メンバー設定 ==========
+
+def load_members():
+    try:
+        with open("members.json", encoding="utf-8") as f:
+            data = json.load(f)
+        members = data.get("members", [])
+        valid = [m for m in members if m.get("name") and m.get("email")]
+        print("[OK] メンバー読込: " + str(len(valid)) + "名")
+        return valid
+    except FileNotFoundError:
+        print("[WARN] members.json なし。単一配信モードで実行")
+        to = os.environ.get("MAIL_TO", "")
+        if to:
+            return [{"name": "", "email": to, "focus": ""}]
+        return []
+    except Exception as e:
+        print("[ERROR] members.json 読込失敗: " + str(e))
+        return []
 
 
 # ========== RSS取得 ==========
@@ -185,56 +206,119 @@ def cap_articles(articles, limit=MAX_TOTAL_ARTICLES):
 
 # ========== フィードバック ==========
 
-def load_feedback():
+def load_all_feedback():
+    """全員分のフィードバックを取得し氏名でグループ化"""
     url = os.environ.get("FEEDBACK_CSV_URL")
+    result = {}
     if not url:
-        return [], []
+        print("[INFO] FEEDBACK_CSV_URL 未設定")
+        return result
     try:
         res = requests.get(url, timeout=30)
         res.raise_for_status()
         res.encoding = "utf-8"
         rows = list(csv.reader(io.StringIO(res.text)))
         if len(rows) < 2:
-            return [], []
-        good = []
-        bad = []
+            return result
+
         for row in rows[1:][-MAX_FEEDBACK_ROWS:]:
-            if len(row) < 3:
+            if len(row) < 4:
                 continue
-            title = clean_text(row[1])[:120]
-            rating = row[2].strip().lower()
-            reason = row[3].strip() if len(row) > 3 else ""
+            person = row[1].strip()
+            title = clean_text(row[2])[:120]
+            rating = row[3].strip().lower()
+            reason = row[4].strip() if len(row) > 4 else ""
+
             if not title:
                 continue
+
+            if person not in result:
+                result[person] = {"good": [], "bad": []}
+
             if "good" in rating:
-                good.append(title)
+                result[person]["good"].append(title)
             elif "bad" in rating:
                 if reason:
-                    bad.append(title + "（理由: " + reason + "）")
+                    result[person]["bad"].append(title + "（理由: " + reason + "）")
                 else:
-                    bad.append(title)
-        print("[OK] FB: GOOD " + str(len(good)) + " / BAD " + str(len(bad)))
-        return good, bad
+                    result[person]["bad"].append(title)
+
+        for k, v in result.items():
+            print("[OK] FB " + k + ": GOOD " + str(len(v["good"]))
+                  + " / BAD " + str(len(v["bad"])))
+        return result
     except Exception as e:
-        print("[WARN] FB読込失敗: " + type(e).__name__)
-        return [], []
+        print("[WARN] FB読込失敗: " + type(e).__name__ + " " + str(e))
+        return result
 
 
-def build_preference_block(good, bad):
-    if not good and not bad:
-        return ""
-    parts = ["\n# 読者の過去の評価（最優先で反映）\n"]
-    if good:
-        parts.append("## 高評価だった記事")
-        for g in good[-20:]:
-            parts.append("- " + g)
+def build_team_feedback(all_fb, exclude_name):
+    """自分以外のメンバーの評価を集約"""
+    good = []
+    bad = []
+    for person, fb in all_fb.items():
+        if person == exclude_name:
+            continue
+        for g in fb.get("good", []):
+            good.append(g + "［" + person + "］")
+        for b in fb.get("bad", []):
+            bad.append(b + "［" + person + "］")
+    return {"good": good, "bad": bad}
+
+
+def build_preference_block(member, personal_fb, team_fb):
+    parts = []
+
+    focus = member.get("focus", "").strip()
+    if focus:
         parts.append("")
-    if bad:
-        parts.append("## 低評価だった記事")
-        for b in bad[-20:]:
-            parts.append("- " + b)
+        parts.append("# この読者の関心領域（基本方針）")
+        parts.append(focus)
         parts.append("")
-    parts.append("上記から関心領域を推論し、低評価に類似する記事は選ばないこと。\n")
+
+    p_good = personal_fb.get("good", [])
+    p_bad = personal_fb.get("bad", [])
+
+    if p_good or p_bad:
+        parts.append("# 本人の評価履歴（最優先で反映すること）")
+        parts.append("")
+        if p_good:
+            parts.append("## 本人が高く評価した記事")
+            for g in p_good[-15:]:
+                parts.append("- " + g)
+            parts.append("")
+        if p_bad:
+            parts.append("## 本人が不要と評価した記事")
+            for b in p_bad[-15:]:
+                parts.append("- " + b)
+            parts.append("")
+
+    t_good = team_fb.get("good", [])
+    t_bad = team_fb.get("bad", [])
+
+    if t_good or t_bad:
+        parts.append("# チーム全体の傾向（参考情報）")
+        parts.append("同じチームの同僚が評価した記事です。")
+        parts.append("本人の評価履歴と矛盾する場合は、必ず本人の評価を優先してください。")
+        parts.append("")
+        if t_good:
+            parts.append("## チームで評価が高かった記事")
+            for g in t_good[-12:]:
+                parts.append("- " + g)
+            parts.append("")
+        if t_bad:
+            parts.append("## チームで不要とされた記事")
+            for b in t_bad[-12:]:
+                parts.append("- " + b)
+            parts.append("")
+
+    if p_good or p_bad or t_good or t_bad:
+        parts.append("# 評価の活用方針")
+        parts.append("上記の評価履歴から読者の関心領域を推論してください。")
+        parts.append("不要と評価された記事に類似する内容は選定から除外してください。")
+        parts.append("本人の評価が少ない場合は、チーム全体の傾向を補助的に参考にしてください。")
+        parts.append("")
+
     return "\n".join(parts)
 
 
@@ -273,7 +357,6 @@ def call_groq(prompt):
                     time.sleep(25)
                     continue
                 res.raise_for_status()
-                print("[OK] 要約成功: " + model)
                 return res.json()["choices"][0]["message"]["content"]
             except Exception as e:
                 last_error = e
@@ -343,21 +426,30 @@ def select_and_summarize(articles, preference):
 
 # ========== HTMLメール生成 ==========
 
-def form_urls(title):
+def form_urls(title, person_name):
     base = os.environ.get("FORM_BASE_URL", "")
+    e_name = os.environ.get("FORM_ENTRY_NAME", "")
     e_title = os.environ.get("FORM_ENTRY_TITLE", "")
     e_rating = os.environ.get("FORM_ENTRY_RATING", "")
+
     if not base or not e_title or not e_rating:
         return None, None
-    q = urllib.parse.quote(title[:150], safe="")
+
+    q_title = urllib.parse.quote(title[:150], safe="")
     sep = "&" if "?" in base else "?"
-    good = base + sep + e_title + "=" + q + "&" + e_rating + "=good"
-    bad = base + sep + e_title + "=" + q + "&" + e_rating + "=bad"
+
+    name_part = ""
+    if e_name and person_name:
+        name_part = "&" + e_name + "=" + urllib.parse.quote(person_name, safe="")
+
+    good = base + sep + e_title + "=" + q_title + "&" + e_rating + "=good" + name_part
+    bad = base + sep + e_title + "=" + q_title + "&" + e_rating + "=bad" + name_part
     return good, bad
 
 
-def build_html(items, articles):
+def build_html(items, articles, member):
     today = datetime.now(JST).strftime("%Y年%m月%d日")
+    person = member.get("name", "")
 
     css_card = "background:#ffffff;border:1px solid #e3e8ef;border-radius:10px;padding:22px;margin-bottom:18px;"
     css_btn_good = "display:inline-block;padding:9px 22px;background:#0a7d3f;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;font-weight:600;margin-right:8px;"
@@ -372,8 +464,10 @@ def build_html(items, articles):
 
     p.append('<div style="background:#12263f;border-radius:10px;padding:26px;margin-bottom:22px;">')
     p.append('<div style="color:#ffffff;font-size:21px;font-weight:700;">AdTech Daily Digest</div>')
-    p.append('<div style="color:#9fb3cc;font-size:13px;margin-top:7px;">'
-             + today + ' ／ 厳選 ' + str(len(items)) + '件</div>')
+    sub = today + ' ／ 厳選 ' + str(len(items)) + '件'
+    if person:
+        sub = html.escape(person) + ' さん向け ／ ' + sub
+    p.append('<div style="color:#9fb3cc;font-size:13px;margin-top:7px;">' + sub + '</div>')
     p.append('</div>')
 
     valid = 0
@@ -391,7 +485,7 @@ def build_html(items, articles):
         source = html.escape(src["source"])
         orig = html.escape(src["title"][:110])
 
-        good_url, bad_url = form_urls(src["title"])
+        good_url, bad_url = form_urls(src["title"], person)
 
         p.append('<div style="' + css_card + '">')
 
@@ -437,24 +531,29 @@ def build_html(items, articles):
 
     p.append('<div style="text-align:center;padding:22px 12px;color:#94a1b2;'
              'font-size:11px;line-height:1.8;">')
-    p.append('評価いただいた内容は翌日以降の記事選定に反映されます。<br>')
+    p.append('評価いただいた内容は翌日以降のあなた向け記事選定に反映されます。<br>')
     p.append('このメールは GitHub Actions により自動配信されています。')
     p.append('</div>')
     p.append('</div></body></html>')
     return "".join(p)
 
 
-def build_text(items, articles):
+def build_text(items, articles, member):
     lines = []
-    lines.append("AdTech Daily Digest " + datetime.now(JST).strftime("%Y/%m/%d"))
+    person = member.get("name", "")
+    head = "AdTech Daily Digest " + datetime.now(JST).strftime("%Y/%m/%d")
+    if person:
+        head = person + " さん向け " + head
+    lines.append(head)
     lines.append("")
+
     n = 0
     for item in items:
         idx = item.get("id")
         if not isinstance(idx, int) or idx < 0 or idx >= len(articles):
             continue
         n += 1
-        src = articles[idx]
+                src = articles[idx]
         lines.append("[" + str(n) + "] " + str(item.get("headline") or src["title"]))
         lines.append("媒体: " + src["source"])
         lines.append(str(item.get("summary") or ""))
@@ -462,6 +561,7 @@ def build_text(items, articles):
             lines.append("POINT: " + str(item["insight"]))
         lines.append(src["link"])
         lines.append("")
+
     lines.append("※HTMLメール対応の環境でご覧いただくと評価ボタンが表示されます。")
     return "\n".join(lines)
 
@@ -492,17 +592,16 @@ def build_fallback_text(articles):
 
 # ========== メール送信 ==========
 
-def send_mail(html_body, text_body):
+def send_mail(to_email, html_body, text_body, person=""):
     gmail_user = os.environ["GMAIL_USER"]
     gmail_pass = os.environ["GMAIL_APP_PASSWORD"]
-    mail_to = os.environ["MAIL_TO"]
 
     today = datetime.now(JST).strftime("%m/%d")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = Header("AdTech Daily Digest " + today, "utf-8")
     msg["From"] = formataddr((str(Header("AdTech Digest", "utf-8")), gmail_user))
-    msg["To"] = mail_to
+    msg["To"] = to_email
 
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
@@ -511,42 +610,85 @@ def send_mail(html_body, text_body):
         server.login(gmail_user, gmail_pass)
         server.send_message(msg)
 
-    print("[OK] メール送信完了")
+    label = person if person else to_email
+    print("[OK] 送信完了: " + label)
 
 
 # ========== メイン ==========
 
 def main():
+    members = load_members()
+    if not members:
+        print("[ERROR] 配信先が設定されていません")
+        return
+
     arts = fetch_articles()
     print("取得記事数: " + str(len(arts)))
 
     if not arts:
-        send_mail(
-            "<html><body><p>本日は対象期間内の新着記事がありませんでした。</p></body></html>",
-            "本日は対象期間内の新着記事がありませんでした。",
-        )
+        for m in members:
+            send_mail(
+                m["email"],
+                "<html><body><p>本日は対象期間内の新着記事がありませんでした。</p></body></html>",
+                "本日は対象期間内の新着記事がありませんでした。",
+                m.get("name", ""),
+            )
         return
 
     arts = cap_articles(arts)
-    good, bad = load_feedback()
-    pref = build_preference_block(good, bad)
+    all_fb = load_all_feedback()
 
-    try:
-        items = select_and_summarize(arts, pref)
-        print("[OK] 選定記事数: " + str(len(items)))
+    total_good = 0
+    total_bad = 0
+    for v in all_fb.values():
+        total_good += len(v.get("good", []))
+        total_bad += len(v.get("bad", []))
+    print("[INFO] チーム全体の評価: GOOD " + str(total_good)
+          + " / BAD " + str(total_bad))
 
-        if not items:
-            raise RuntimeError("選定結果が空です")
+    success = 0
+    for i, member in enumerate(members):
+        name = member.get("name", "")
+        label = name if name else member["email"]
+        print("")
+        print("===== 処理中: " + label + " =====")
 
-        html_body = build_html(items, arts)
-        text_body = build_text(items, arts)
+        personal_fb = all_fb.get(name, {"good": [], "bad": []})
+        team_fb = build_team_feedback(all_fb, name)
 
-    except Exception as e:
-        print("[ERROR] 要約失敗: " + str(e))
-        html_body = build_fallback_html(arts)
-        text_body = build_fallback_text(arts)
+        print("[INFO] 本人 GOOD " + str(len(personal_fb.get("good", [])))
+              + " / BAD " + str(len(personal_fb.get("bad", [])))
+              + "　チーム GOOD " + str(len(team_fb["good"]))
+              + " / BAD " + str(len(team_fb["bad"])))
 
-    send_mail(html_body, text_body)
+        pref = build_preference_block(member, personal_fb, team_fb)
+
+        try:
+            items = select_and_summarize(arts, pref)
+            print("[OK] 選定記事数: " + str(len(items)))
+
+            if not items:
+                raise RuntimeError("選定結果が空です")
+
+            html_body = build_html(items, arts, member)
+            text_body = build_text(items, arts, member)
+
+        except Exception as e:
+            print("[ERROR] 要約失敗: " + str(e))
+            html_body = build_fallback_html(arts)
+            text_body = build_fallback_text(arts)
+
+        try:
+            send_mail(member["email"], html_body, text_body, name)
+            success += 1
+        except Exception as e:
+            print("[ERROR] 送信失敗 " + member["email"] + ": " + str(e))
+
+        if i < len(members) - 1:
+            time.sleep(10)
+
+    print("")
+    print("[DONE] " + str(success) + "/" + str(len(members)) + " 名に配信完了")
 
 
 if __name__ == "__main__":
