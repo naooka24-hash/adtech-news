@@ -18,6 +18,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Syntax check
+        run: python -m py_compile main.py
+
       - name: Run script
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -26,6 +29,7 @@ jobs:
           MAIL_TO: ${{ secrets.MAIL_TO }}
           FEEDBACK_CSV_URL: ${{ secrets.FEEDBACK_CSV_URL }}
           FORM_BASE_URL: ${{ secrets.FORM_BASE_URL }}
+          FORM_ENTRY_NAME: ${{ secrets.FORM_ENTRY_NAME }}
           FORM_ENTRY_TITLE: ${{ secrets.FORM_ENTRY_TITLE }}
           FORM_ENTRY_RATING: ${{ secrets.FORM_ENTRY_RATING }}
         run: python main.py
