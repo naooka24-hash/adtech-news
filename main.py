@@ -1,5 +1,7 @@
 import os
+import time
 import smtplib
+import urllib.request
 import feedparser
 import google.generativeai as genai
 from email.mime.text import MIMEText
@@ -18,8 +20,21 @@ FEEDS = {
 }
 
 MAX_PER_FEED = 6
-HOURS_BACK = 30
+HOURS_BACK = 48
 JST = timezone(timedelta(hours=9))
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+
+
+def fetch_feed(url):
+    """User-Agentを付けてRSSを取得"""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    })
+    with urllib.request.urlopen(req, timeout=30) as res:
+        return feedparser.parse(res.read())
 
 
 def fetch_articles():
@@ -27,7 +42,8 @@ def fetch_articles():
     articles = []
     for name, url in FEEDS.items():
         try:
-            feed = feedparser.parse(url)
+            feed = fetch_feed(url)
+            total = len(feed.entries)
             count = 0
             for entry in feed.entries:
                 if count >= MAX_PER_FEED:
@@ -44,15 +60,14 @@ def fetch_articles():
                     "summary": entry.get("summary", "")[:600],
                 })
                 count += 1
-            print(f"[OK] {name}: {count}件")
+            print(f"[OK] {name}: 採用{count}件 / フィード内{total}件")
         except Exception as e:
-            print(f"[WARN] {name}: {e}")
+            print(f"[WARN] {name}: {type(e).__name__} {e}")
     return articles
 
 
 def summarize(articles):
     genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-    model = genai.GenerativeModel("gemini-2.0-flash")
 
     body = "\n\n".join(
         f"[{a['source']}] {a['title']}\nURL: {a['link']}\n{a['summary']}"
@@ -75,8 +90,6 @@ def summarize(articles):
 【出典】媒体名
 URL
 
-（1件ごとに空行を1つ入れる）
-
 # 選定ルール
 - プライバシー規制、Cookie、CTV、リテールメディア、AI活用、M&A、大手プラットフォーム動向を優先
 - 単なる製品宣伝、人事異動、イベント告知は除外
@@ -86,8 +99,37 @@ URL
 # 記事一覧
 {body}
 """
-    response = model.generate_content(prompt)
-    return response.text
+
+    models_to_try = ["gemini-2.0-flash", "gemini-flash-latest", "gemini-2.5-flash"]
+    last_error = None
+
+    for model_name in models_to_try:
+        for attempt in range(3):
+            try:
+                model = genai.GenerativeModel(model_name)
+                res = model.generate_content(prompt)
+                print(f"[OK] 要約成功: {model_name}")
+                return res.text
+            except Exception as e:
+                last_error = e
+                msg = str(e)
+                print(f"[WARN] {model_name} 試行{attempt+1}: {type(e).__name__}")
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                    if "limit: 0" in msg:
+                        break  # 枠自体がない → 次のモデルへ
+                    time.sleep(65)
+                    continue
+                break  # その他のエラーは次のモデルへ
+
+    raise RuntimeError(f"全モデルで失敗: {last_error}")
+
+
+def build_fallback(articles):
+    """要約失敗時: 記事リストだけ送る"""
+    lines = ["※AI要約に失敗したため、記事一覧のみ送信します。\n"]
+    for i, a in enumerate(articles, 1):
+        lines.append(f"{i}. [{a['source']}] {a['title']}\n   {a['link']}\n")
+    return "\n".join(lines)
 
 
 def send_mail(text):
@@ -96,11 +138,10 @@ def send_mail(text):
     mail_to = os.environ["MAIL_TO"]
 
     today = datetime.now(JST).strftime("%Y/%m/%d")
-    header = f"アドテクニュース {today}\n\n"
     footer = "\n\n---\nこのメールは自動配信されています。\n"
 
-    msg = MIMEText(header + text + footer, "plain", "utf-8")
-    msg["Subject"] = Header(f"📰 アドテクニュース {today}", "utf-8")
+    msg = MIMEText(text + footer, "plain", "utf-8")
+    msg["Subject"] = Header(f"アドテクニュース {today}", "utf-8")
     msg["From"] = formataddr((str(Header("AdTech News", "utf-8")), gmail_user))
     msg["To"] = mail_to
 
@@ -114,7 +155,13 @@ def send_mail(text):
 if __name__ == "__main__":
     arts = fetch_articles()
     print(f"合計取得記事数: {len(arts)}")
+
     if not arts:
         send_mail("本日は対象期間内の新着記事がありませんでした。")
     else:
-        send_mail(summarize(arts))
+        try:
+            content = summarize(arts)
+        except Exception as e:
+            print(f"[ERROR] 要約失敗: {e}")
+            content = build_fallback(arts)
+        send_mail(content)
