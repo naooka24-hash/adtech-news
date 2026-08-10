@@ -70,8 +70,6 @@ EXCLUDE_KEYWORDS = [
 ]
 
 
-# ========== ユーティリティ ==========
-
 def clean_text(text):
     if not text:
         return ""
@@ -94,8 +92,6 @@ def normalize_url(url):
         return url.lower()
 
 
-# ========== メンバー設定 ==========
-
 def load_members():
     try:
         with open("members.json", encoding="utf-8") as f:
@@ -114,8 +110,6 @@ def load_members():
         print("[ERROR] members.json 読込失敗: " + str(e))
         return []
 
-
-# ========== RSS取得 ==========
 
 def fetch_feed(url):
     req = urllib.request.Request(url, headers={
@@ -203,11 +197,7 @@ def cap_articles(articles, limit=MAX_TOTAL_ARTICLES):
     print("[INFO] " + str(len(articles)) + "件 -> " + str(len(result)) + "件に絞込")
     return result
 
-
-# ========== フィードバック ==========
-
 def load_all_feedback():
-    """全員分のフィードバックを取得し氏名でグループ化"""
     url = os.environ.get("FEEDBACK_CSV_URL")
     result = {}
     if not url:
@@ -253,7 +243,6 @@ def load_all_feedback():
 
 
 def build_team_feedback(all_fb, exclude_name):
-    """自分以外のメンバーの評価を集約"""
     good = []
     bad = []
     for person, fb in all_fb.items():
@@ -321,8 +310,6 @@ def build_preference_block(member, personal_fb, team_fb):
 
     return "\n".join(parts)
 
-
-# ========== 要約 ==========
 
 def call_groq(prompt):
     api_key = os.environ["GROQ_API_KEY"]
@@ -424,8 +411,6 @@ def select_and_summarize(articles, preference):
     return data.get("articles", [])
 
 
-# ========== HTMLメール生成 ==========
-
 def form_urls(title, person_name):
     base = os.environ.get("FORM_BASE_URL", "")
     e_name = os.environ.get("FORM_ENTRY_NAME", "")
@@ -445,7 +430,6 @@ def form_urls(title, person_name):
     good = base + sep + e_title + "=" + q_title + "&" + e_rating + "=good" + name_part
     bad = base + sep + e_title + "=" + q_title + "&" + e_rating + "=bad" + name_part
     return good, bad
-
 
 def build_html(items, articles, member):
     today = datetime.now(JST).strftime("%Y年%m月%d日")
@@ -553,7 +537,7 @@ def build_text(items, articles, member):
         if not isinstance(idx, int) or idx < 0 or idx >= len(articles):
             continue
         n += 1
-                src = articles[idx]
+        src = articles[idx]
         lines.append("[" + str(n) + "] " + str(item.get("headline") or src["title"]))
         lines.append("媒体: " + src["source"])
         lines.append(str(item.get("summary") or ""))
@@ -590,8 +574,6 @@ def build_fallback_text(articles):
     return "\n".join(lines)
 
 
-# ========== メール送信 ==========
-
 def send_mail(to_email, html_body, text_body, person=""):
     gmail_user = os.environ["GMAIL_USER"]
     gmail_pass = os.environ["GMAIL_APP_PASSWORD"]
@@ -613,8 +595,6 @@ def send_mail(to_email, html_body, text_body, person=""):
     label = person if person else to_email
     print("[OK] 送信完了: " + label)
 
-
-# ========== メイン ==========
 
 def main():
     members = load_members()
