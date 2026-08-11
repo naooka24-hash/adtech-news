@@ -95,9 +95,7 @@ def normalize_url(url):
     except Exception:
         return url.lower()
 
-
-def load_members():
-    def load_history():
+def load_history():
     """配信済み履歴を読み込み、古いものを削除"""
     try:
         with open(HISTORY_FILE, encoding="utf-8") as f:
@@ -129,7 +127,9 @@ def save_history(history):
     try:
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=1, sort_keys=True)
-        total = sum(len(v) for v in history.values())
+        total = 0
+        for v in history.values():
+            total += len(v)
         print("[OK] 履歴保存: 全" + str(total) + "件")
         return True
     except Exception as e:
@@ -166,12 +166,17 @@ def record_sent(history, person, articles, items):
         history[person][key] = today
         count += 1
     return count
-    
+
+
+def load_members():
     try:
         with open("members.json", encoding="utf-8") as f:
             data = json.load(f)
         members = data.get("members", [])
-        valid = [m for m in members if m.get("name") and m.get("email")]
+        valid = []
+        for m in members:
+            if m.get("name") and m.get("email"):
+                valid.append(m)
         print("[OK] メンバー読込: " + str(len(valid)) + "名")
         return valid
     except FileNotFoundError:
@@ -251,6 +256,7 @@ def fetch_articles(hours_back=None):
 
     print("[INFO] フィード成功 " + str(ok_count) + "/" + str(len(FEEDS)))
     return articles
+
 
 
 def cap_articles(articles, limit=MAX_TOTAL_ARTICLES):
