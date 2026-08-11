@@ -42,19 +42,20 @@ FEEDS = {
 MAX_PER_FEED = 4
 HOURS_BACK = 30
 MAX_ARTICLES_IN_MAIL = 8
-MAX_TOTAL_ARTICLES = 40
+MAX_TOTAL_ARTICLES = 50
 MAX_FEEDBACK_ROWS = 200
 HISTORY_FILE = "sent_history.json"
 HISTORY_DAYS = 14
 EXTENDED_HOURS = 96
 MIN_ARTICLES = 3
+SUMMARIZE_COUNT = 14
 JST = timezone(timedelta(hours=9))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODELS = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
+GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
 EXCLUDE_KEYWORDS = [
     "hires", "promotes", "appoints", "joins ", "names ", "steps down",
@@ -548,67 +549,80 @@ def parse_json_safely(raw):
     raise ValueError("JSON解析失敗: " + raw[:200])
 
 
-def select_and_summarize(articles, preference):
+TAG_LIST = [
+    "privacy",
+    "platform",
+    "ctv",
+    "retail",
+    "ma",
+    "measurement",
+    "ai",
+    "agency",
+    "japan",
+    "search",
+]
+
+
+def summarize_common(articles):
+    """全員共通の要約を1回だけ生成"""
     blocks = []
     for i, a in enumerate(articles):
         blocks.append(
-            "ID:" + str(i) + "\n媒体:" + a["source"] + "\n原題:" + a["title"]
-            + "\n概要:" + a["summary"][:300]
+            "ID:" + str(i) + " [" + a["source"] + "] " + a["title"]
+            + "\n" + a["summary"][:200]
         )
     indexed = "\n\n".join(blocks)
 
     prompt = (
         "以下はアドテク・デジタルマーケティング業界の最新記事一覧です。\n"
-        "日本の広告事業従事者にとって重要度が高いものを最大"
-        + str(MAX_ARTICLES_IN_MAIL) + "件選び、日本語で要約してください。\n"
-        + preference
+        "日本の広告事業従事者にとって重要度が高いものを"
+        + str(SUMMARIZE_COUNT) + "件選び、日本語で要約してください。\n"
         + """
 # 出力形式
-以下のJSON形式のみを出力してください。前置きや説明文は不要です。
+以下のJSON形式のみを出力してください。前置きや説明は不要です。
 
 {
   "articles": [
     {
       "id": 記事のID番号（整数）,
-      "headline": "日本語の見出し。30〜45文字。具体的な企業名や数字を含める",
-      "summary": "概要を3〜4文で。何が起きたか、背景、影響を具体的に記述する",
-      "insight": "日本の広告関係者にとっての示唆を1〜2文。実務への影響を具体的に"
+      "headline": "日本語の見出し。30〜45文字",
+      "summary": "概要を3〜4文で具体的に記述",
+      "insight": "日本の広告関係者への示唆を1〜2文",
+      "tags": ["該当するタグを1〜3個"],
+      "importance": 重要度を1〜10の整数で
     }
   ]
 }
 
-# 選定基準（優先度順）
-1. プライバシー規制、Cookie、アイデンティティ技術の動向
-2. Google、Meta、Amazon、TikTok など大手プラットフォームの広告仕様変更
-3. CTV、リテールメディアの市場動向
-4. アドテク企業のM&A、資金調達、業績
-5. 広告計測、アトリビューション技術の進展
-6. 生成AIの広告領域への実装事例
+# 使用可能なタグ
+privacy     : プライバシー規制、Cookie、同意管理、アイデンティティ
+platform    : Google/Meta/Amazon/TikTok等の広告仕様変更
+ctv         : CTV、ストリーミング、動画広告
+retail      : リテールメディア、コマース広告
+ma          : M&A、資金調達、業績、倒産
+measurement : 計測、アトリビューション、ブランドセーフティ、アドフラウド
+ai          : 生成AIの広告領域への実装
+agency      : 代理店動向、業界構造の変化
+japan       : 日本国内市場の動向
+search      : 検索広告、SEO、SGE
 
-# 除外するもの
-- セミナー、ウェビナー告知、イベント案内
-- 人事異動、組織改編
-- 単なる製品リリース告知
-- 個別ブランドのキャンペーン事例
-- 広告業界と関連の薄い一般テックニュース
+# 選定基準
+上記タグに該当する記事を優先。
+セミナー告知、人事異動、個別ブランドのキャンペーン事例は除外。
 
 # 記述ルール
-- summary は「〜について報じられた」のような内容の薄い表現を禁止
-- insight は「AIの活用による効率化」のような一般論を禁止
-- 専門用語は原語のまま（SSP, DSP, PMP, CDP, CTV など）
-- 同一の出来事を複数媒体が報じている場合は1件にまとめる
+- summary は「〜について報じられた」等の空虚な表現を禁止
+- insight は「効率化が期待される」等の一般論を禁止
+- 専門用語は原語のまま（SSP, DSP, PMP, CDP, CTV）
 
 # 記事一覧
 """
         + indexed
     )
 
-    raw = call_groq(prompt)
+    raw = call_groq(prompt, max_tokens=6000)
     data = parse_json_safely(raw)
-
     items = data.get("articles", [])
-    if not isinstance(items, list):
-        raise ValueError("articles が配列ではありません")
 
     valid = []
     for it in items:
@@ -618,10 +632,104 @@ def select_and_summarize(articles, preference):
         if isinstance(idx, str) and idx.isdigit():
             idx = int(idx)
             it["id"] = idx
-        if isinstance(idx, int) and 0 <= idx < len(articles):
-            valid.append(it)
+        if not isinstance(idx, int) or idx < 0 or idx >= len(articles):
+            continue
 
+        tags = it.get("tags", [])
+        if not isinstance(tags, list):
+            tags = []
+        it["tags"] = [str(t).lower().strip() for t in tags if t]
+
+        imp = it.get("importance", 5)
+        try:
+            it["importance"] = int(imp)
+        except Exception:
+            it["importance"] = 5
+
+        valid.append(it)
+
+    print("[OK] 共通要約: " + str(len(valid)) + "件")
     return valid
+
+
+def extract_tag_prefs(articles, common_items, fb):
+    """評価履歴からタグごとのスコアを算出"""
+    title_to_tags = {}
+    for it in common_items:
+        idx = it.get("id")
+        if isinstance(idx, int) and 0 <= idx < len(articles):
+            key = articles[idx]["title"].lower()[:60]
+            title_to_tags[key] = it.get("tags", [])
+
+    scores = {}
+    for t in TAG_LIST:
+        scores[t] = 0.0
+
+    for title in fb.get("good", []):
+        key = title.lower()[:60]
+        for k, tags in title_to_tags.items():
+            if key[:30] in k or k[:30] in key:
+                for t in tags:
+                    if t in scores:
+                        scores[t] += 1.0
+
+    for title in fb.get("bad", []):
+        key = title.lower()[:60]
+        for k, tags in title_to_tags.items():
+            if key[:30] in k or k[:30] in key:
+                for t in tags:
+                    if t in scores:
+                        scores[t] -= 1.2
+
+    return scores
+
+
+def personalize(articles, common_items, member, personal_fb, team_fb, limit):
+    """個人向けに記事を選択・並べ替え"""
+    p_scores = extract_tag_prefs(articles, common_items, personal_fb)
+    t_scores = extract_tag_prefs(articles, common_items, team_fb)
+
+    focus = member.get("focus", "").lower()
+    focus_tags = []
+    focus_map = {
+        "privacy": ["プライバシー", "規制", "cookie", "クッキー"],
+        "platform": ["プラットフォーム", "google", "meta", "amazon"],
+        "ctv": ["ctv", "動画", "ストリーミング", "テレビ"],
+        "retail": ["リテール", "コマース", "ec"],
+        "ma": ["m&a", "買収", "資金調達", "業績"],
+        "measurement": ["計測", "アトリビューション", "測定"],
+        "ai": ["ai", "生成ai"],
+        "agency": ["代理店", "エージェンシー"],
+        "japan": ["国内", "日本"],
+        "search": ["検索", "seo", "リスティング"],
+    }
+    for tag, words in focus_map.items():
+        for w in words:
+            if w in focus:
+                focus_tags.append(tag)
+                break
+
+    scored = []
+    for it in common_items:
+        base = float(it.get("importance", 5))
+        tags = it.get("tags", [])
+
+        personal = 0.0
+        team = 0.0
+        for t in tags:
+            personal += p_scores.get(t, 0.0)
+            team += t_scores.get(t, 0.0)
+
+        focus_bonus = 0.0
+        for t in tags:
+            if t in focus_tags:
+                focus_bonus += 2.5
+
+        total = base + personal * 2.0 + team * 0.6 + focus_bonus
+        scored.append((total, it))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [it for _, it in scored[:limit]]
 
 
 def form_urls(title, person_name):
@@ -822,13 +930,7 @@ def build_empty_html(member, reason=""):
     p.append('</td></tr>')
 
     p.append('<tr><td style="height:20px;"></td></tr>')
-    if note:
-        p.append('<tr><td style="background-color:#fef9e7;border-radius:10px;'
-                 'padding:14px 20px;margin-bottom:16px;">')
-        p.append('<div style="font-size:12px;color:#92702a;line-height:1.7;">'
-                 '&#9432; ' + html.escape(note) + '</div>')
-        p.append('</td></tr>')
-        p.append('<tr><td style="height:16px;"></td></tr>')
+
     p.append('<tr><td style="background-color:#ffffff;border-radius:14px;'
              'padding:44px 32px;text-align:center;">')
     p.append('<div style="font-size:38px;margin-bottom:18px;">&#127749;</div>')
@@ -899,13 +1001,30 @@ def main():
 
     history = load_history()
 
-    arts_normal = fetch_articles(HOURS_BACK)
-    print("通常範囲(" + str(HOURS_BACK) + "h)の取得: " + str(len(arts_normal)) + "件")
+    arts_all = fetch_articles(HOURS_BACK)
+    print("通常範囲(" + str(HOURS_BACK) + "h)の取得: " + str(len(arts_all)) + "件")
 
-    arts_extended = None
+    if len(arts_all) < MIN_ARTICLES:
+        print("[INFO] 記事が少ないため範囲を拡大")
+        arts_all = fetch_articles(EXTENDED_HOURS)
+        print("拡大範囲の取得: " + str(len(arts_all)) + "件")
+
+    if not arts_all:
+        for m in members:
+            try:
+                send_mail(
+                    m["email"],
+                    build_empty_html(m, "収集対象の媒体に新着記事がありませんでした。"),
+                    build_empty_text(m, "収集対象の媒体に新着記事がありませんでした。"),
+                    m.get("name", ""),
+                )
+            except Exception as e:
+                print("[ERROR] 送信失敗: " + str(e))
+        return
+
+    arts = cap_articles(arts_all)
 
     all_fb = load_all_feedback()
-
     total_good = 0
     total_bad = 0
     for v in all_fb.values():
@@ -913,6 +1032,14 @@ def main():
         total_bad += len(v.get("bad", []))
     print("[INFO] チーム全体の評価: GOOD " + str(total_good)
           + " / BAD " + str(total_bad))
+
+    print("")
+    print("===== 共通要約を生成 =====")
+    common_items = []
+    try:
+        common_items = summarize_common(arts)
+    except Exception as e:
+        print("[ERROR] 共通要約に失敗: " + str(e))
 
     success = 0
     empty_sent = 0
@@ -925,67 +1052,51 @@ def main():
         print("===== 処理中: " + label + " =====")
 
         sent_map = history.get(name, {})
-        arts = filter_unsent(arts_normal, sent_map)
-        note = ""
-
-        # 段階1: 通常範囲で不足なら範囲拡大
-        if len(arts) < MIN_ARTICLES:
-            print("[INFO] 未配信" + str(len(arts)) + "件。範囲を"
-                  + str(EXTENDED_HOURS) + "hに拡大して再取得します")
-
-            if arts_extended is None:
-                arts_extended = fetch_articles(EXTENDED_HOURS)
-                print("[INFO] 拡大範囲の取得: " + str(len(arts_extended)) + "件")
-
-            arts = filter_unsent(arts_extended, sent_map)
-            if arts:
-                note = "直近" + str(EXTENDED_HOURS) + "時間まで範囲を広げて収集しました。"
-
-        # 段階2: それでも0件なら空メール
-        if not arts:
-            print("[INFO] " + label + ": 未配信記事なし。空メールを送信します")
-            try:
-                send_mail(
-                    member["email"],
-                    build_empty_html(member, "収集対象の媒体に未読の新着記事がありませんでした。"),
-                    build_empty_text(member, "収集対象の媒体に未読の新着記事がありませんでした。"),
-                    name,
-                )
-                empty_sent += 1
-            except Exception as e:
-                print("[ERROR] 送信失敗: " + str(e))
-            if i < len(members) - 1:
-                time.sleep(5)
-            continue
-
-        arts = cap_articles(arts)
-
-        personal_fb = all_fb.get(name, {"good": [], "bad": []})
-        team_fb = build_team_feedback(all_fb, name)
-
-        print("[INFO] 本人 GOOD " + str(len(personal_fb.get("good", [])))
-              + " / BAD " + str(len(personal_fb.get("bad", [])))
-              + "　チーム GOOD " + str(len(team_fb["good"]))
-              + " / BAD " + str(len(team_fb["bad"])))
-
-        pref = build_preference_block(member, personal_fb, team_fb)
-
         items = []
-        try:
-            items = select_and_summarize(arts, pref)
-            print("[OK] 選定記事数: " + str(len(items)))
 
-            if not items:
-                raise RuntimeError("選定結果が空です")
+        if common_items:
+            unsent_items = []
+            for it in common_items:
+                idx = it.get("id")
+                if not isinstance(idx, int) or idx < 0 or idx >= len(arts):
+                    continue
+                key = normalize_url(arts[idx]["link"])
+                if key not in sent_map:
+                    unsent_items.append(it)
 
-            html_body = build_html(items, arts, member, note)
-            text_body = build_text(items, arts, member, note)
+            print("[INFO] 未配信候補: " + str(len(unsent_items)) + "件")
 
-        except Exception as e:
-            print("[ERROR] 要約失敗: " + str(e))
+            if not unsent_items:
+                print("[INFO] 未配信記事なし。空メールを送信")
+                try:
+                    send_mail(
+                        member["email"],
+                        build_empty_html(member, "未読の新着記事がありませんでした。"),
+                        build_empty_text(member, "未読の新着記事がありませんでした。"),
+                        name,
+                    )
+                    empty_sent += 1
+                except Exception as e:
+                    print("[ERROR] 送信失敗: " + str(e))
+                continue
+
+            personal_fb = all_fb.get(name, {"good": [], "bad": []})
+            team_fb = build_team_feedback(all_fb, name)
+            print("[INFO] 本人 GOOD " + str(len(personal_fb.get("good", [])))
+                  + " / BAD " + str(len(personal_fb.get("bad", [])))
+                  + "　チーム GOOD " + str(len(team_fb["good"]))
+                  + " / BAD " + str(len(team_fb["bad"])))
+
+            items = personalize(arts, unsent_items, member,
+                                personal_fb, team_fb, MAX_ARTICLES_IN_MAIL)
+            print("[OK] 選定: " + str(len(items)) + "件")
+
+            html_body = build_html(items, arts, member)
+            text_body = build_text(items, arts, member)
+        else:
+            print("[WARN] 共通要約なし。フォールバック送信")
             html_body = build_fallback_html(arts)
             text_body = build_fallback_text(arts)
-            items = []
 
         try:
             send_mail(member["email"], html_body, text_body, name)
@@ -997,9 +1108,7 @@ def main():
         except Exception as e:
             print("[ERROR] 送信失敗 " + member["email"] + ": " + str(e))
 
-        if i < len(members) - 1:
-            print("[INFO] 次のメンバーまで70秒待機")
-            time.sleep(70)
+        time.sleep(3)
 
     if history_changed:
         save_history(history)
