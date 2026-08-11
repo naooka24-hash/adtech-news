@@ -21,14 +21,7 @@ FEEDS = {
     "Digiday": "https://digiday.com/feed/",
     "AdMonsters": "https://www.admonsters.com/feed/",
     "ExchangeWire": "https://www.exchangewire.com/feed/",
-    "MarTech": "https://martech.org/feed/",
     "Marketing Dive": "https://www.marketingdive.com/feeds/news/",
-    "Mobile Dev Memo": "https://mobiledevmemo.com/feed/",
-    "The Drum": "https://www.thedrum.com/rss.xml",
-    "Marketing Brew": "https://www.marketingbrew.com/feed",
-    "MediaPost Online": "https://feeds.mediapost.com/online-media-daily",
-    "MediaPost RTD": "https://feeds.mediapost.com/real-time-daily",
-    "Search Engine Land": "https://searchengineland.com/feed",
     "Search Engine Journal": "https://www.searchenginejournal.com/feed/",
     "Search Engine Roundtable": "https://www.seroundtable.com/index.rdf",
     "StreamTV Insider": "https://www.streamtvinsider.com/rss/xml",
@@ -39,15 +32,17 @@ FEEDS = {
     "Web担当者Forum": "https://webtan.impress.co.jp/rss.xml",
     "AdverTimes": "https://www.advertimes.com/feed/",
     "DIGIDAY JP": "https://digiday.jp/feed/",
-    "Media Innovation": "https://media-innovation.jp/feed/",
     "ITmedia マーケティング": "https://rss.itmedia.co.jp/rss/2.0/marketing.xml",
-    "unyoo.jp": "https://unyoo.jp/feed/",
+    "Marketing Land": "https://martech.org/feed/",
+    "Adweek": "https://www.adweek.com/feed/",
+    "Campaign Asia": "https://www.campaignasia.com/rss/",
+    "Netインフォメーション": "https://internet.watch.impress.co.jp/data/rss/1.0/iw/feed.rdf",
 }
 
 MAX_PER_FEED = 4
 HOURS_BACK = 30
 MAX_ARTICLES_IN_MAIL = 8
-MAX_TOTAL_ARTICLES = 55
+MAX_TOTAL_ARTICLES = 40
 MAX_FEEDBACK_ROWS = 200
 HISTORY_FILE = "sent_history.json"
 HISTORY_DAYS = 14
@@ -59,7 +54,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+GROQ_MODELS = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
 
 EXCLUDE_KEYWORDS = [
     "hires", "promotes", "appoints", "joins ", "names ", "steps down",
@@ -246,7 +241,7 @@ def fetch_articles(hours_back=None):
                     "source": name,
                     "title": title,
                     "link": link,
-                    "summary": clean_text(entry.get("summary", ""))[:400],
+                    "summary": clean_text(entry.get("summary", ""))[:250],
                 })
                 count += 1
             print("[OK] " + name + ": 採用" + str(count) + " / 全" + str(total))
@@ -285,21 +280,84 @@ def load_all_feedback():
     if not url:
         print("[INFO] FEEDBACK_CSV_URL 未設定")
         return result
+
+    known_names = set()
+    try:
+        with open("members.json", encoding="utf-8") as f:
+            for m in json.load(f).get("members", []):
+                if m.get("name"):
+                    known_names.add(m["name"].strip())
+    except Exception:
+        pass
+
     try:
         res = requests.get(url, timeout=30)
         res.raise_for_status()
         res.encoding = "utf-8"
         rows = list(csv.reader(io.StringIO(res.text)))
         if len(rows) < 2:
+            print("[INFO] フィードバック未登録")
+            return result
+
+        header = [h.strip() for h in rows[0]]
+        print("[INFO] CSV列: " + str(header))
+
+        col_name = -1
+        col_title = -1
+        col_rating = -1
+        col_reason = -1
+
+        for i, h in enumerate(header):
+            low = h.lower()
+            if col_name < 0 and ("氏名" in h or "名前" in h or "name" in low):
+                col_name = i
+            elif col_title < 0 and ("タイトル" in h or "記事" in h or "title" in low):
+                col_title = i
+            elif col_rating < 0 and ("評価" in h or "rating" in low):
+                col_rating = i
+            elif col_reason < 0 and ("理由" in h or "reason" in low):
+                col_reason = i
+
+        if col_rating < 0:
+            for i, row in enumerate(rows[1:6]):
+                for j, cell in enumerate(row):
+                    if cell.strip().lower() in ("good", "bad"):
+                        col_rating = j
+                        break
+                if col_rating >= 0:
+                    break
+
+        if col_name < 0 and known_names:
+            for row in rows[1:6]:
+                for j, cell in enumerate(row):
+                    if cell.strip() in known_names:
+                        col_name = j
+                        break
+                if col_name >= 0:
+                    break
+
+        print("[INFO] 列判定: 氏名=" + str(col_name) + " タイトル=" + str(col_title)
+              + " 評価=" + str(col_rating) + " 理由=" + str(col_reason))
+
+        if col_rating < 0 or col_title < 0:
+            print("[WARN] 必要な列を特定できません")
             return result
 
         for row in rows[1:][-MAX_FEEDBACK_ROWS:]:
-            if len(row) < 4:
+            if len(row) <= max(col_title, col_rating):
                 continue
-            person = row[1].strip()
-            title = clean_text(row[2])[:120]
-            rating = row[3].strip().lower()
-            reason = row[4].strip() if len(row) > 4 else ""
+
+            person = ""
+            if col_name >= 0 and len(row) > col_name:
+                person = row[col_name].strip()
+            if not person:
+                person = "共通"
+
+            title = clean_text(row[col_title])[:120]
+            rating = row[col_rating].strip().lower()
+            reason = ""
+            if col_reason >= 0 and len(row) > col_reason:
+                reason = row[col_reason].strip()
 
             if not title:
                 continue
@@ -319,6 +377,7 @@ def load_all_feedback():
             print("[OK] FB " + k + ": GOOD " + str(len(v["good"]))
                   + " / BAD " + str(len(v["bad"])))
         return result
+
     except Exception as e:
         print("[WARN] FB読込失敗: " + type(e).__name__ + " " + str(e))
         return result
@@ -433,7 +492,8 @@ def call_groq(prompt, max_tokens=5000):
                             wait = int(float(m.group(1))) + 5
                     except Exception:
                         pass
-                    wait = min(wait, 90)
+                    wait = max(wait, 40)
+                    wait = min(wait, 120)
                     print("[WARN] " + model + " 429。" + str(wait) + "秒待機")
                     time.sleep(wait)
                     continue
@@ -938,8 +998,8 @@ def main():
             print("[ERROR] 送信失敗 " + member["email"] + ": " + str(e))
 
         if i < len(members) - 1:
-            print("[INFO] 次のメンバーまで35秒待機")
-            time.sleep(35)
+            print("[INFO] 次のメンバーまで70秒待機")
+            time.sleep(70)
 
     if history_changed:
         save_history(history)
