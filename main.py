@@ -51,6 +51,8 @@ MAX_TOTAL_ARTICLES = 55
 MAX_FEEDBACK_ROWS = 200
 HISTORY_FILE = "sent_history.json"
 HISTORY_DAYS = 14
+EXTENDED_HOURS = 96
+MIN_ARTICLES = 3
 JST = timezone(timedelta(hours=9))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -193,8 +195,10 @@ def fetch_feed(url):
         return feedparser.parse(res.read())
 
 
-def fetch_articles():
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=HOURS_BACK)
+def fetch_articles(hours_back=None):
+    if hours_back is None:
+        hours_back = HOURS_BACK
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     articles = []
     seen_urls = set()
     seen_titles = set()
@@ -574,7 +578,7 @@ def form_urls(title, person_name):
     bad = base + sep + e_title + "=" + q_title + "&" + e_rating + "=bad" + name_part
     return good, bad
 
-def build_html(items, articles, member):
+def build_html(items, articles, member, note=""):
     today = datetime.now(JST).strftime("%Y年%m月%d日")
     person = member.get("name", "")
 
@@ -665,7 +669,7 @@ def build_html(items, articles, member):
     return "".join(p)
 
 
-def build_text(items, articles, member):
+def build_text(items, articles, member, note=""):
     lines = []
     person = member.get("name", "")
     head = "AdTech Daily Digest " + datetime.now(JST).strftime("%Y/%m/%d")
@@ -673,6 +677,10 @@ def build_text(items, articles, member):
         head = person + " さん向け " + head
     lines.append(head)
     lines.append("")
+
+    if note:
+        lines.append("※ " + note)
+        lines.append("")
 
     n = 0
     for item in items:
@@ -716,6 +724,84 @@ def build_fallback_text(articles):
         lines.append("")
     return "\n".join(lines)
 
+def build_empty_html(member, reason=""):
+    today = datetime.now(JST).strftime("%Y.%m.%d")
+    weekday = ["月", "火", "水", "木", "金", "土", "日"][datetime.now(JST).weekday()]
+    person = member.get("name", "")
+
+    p = []
+    p.append('<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">')
+    p.append('<meta name="viewport" content="width=device-width,initial-scale=1"></head>')
+    p.append('<body style="margin:0;padding:0;background-color:#eef1f6;">')
+    p.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+             'style="background-color:#eef1f6;padding:32px 12px;">')
+    p.append('<tr><td align="center">')
+    p.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+             'style="max-width:620px;font-family:-apple-system,BlinkMacSystemFont,'
+             '\'Segoe UI\',\'Hiragino Sans\',sans-serif;">')
+
+    p.append('<tr><td style="background:linear-gradient(135deg,#1a2f4b 0%,#2d5a8c 100%);'
+             'border-radius:16px;padding:36px 32px;">')
+    p.append('<div style="color:#7dd3fc;font-size:11px;font-weight:700;'
+             'letter-spacing:2.5px;text-transform:uppercase;margin-bottom:10px;">'
+             'AdTech Intelligence</div>')
+    p.append('<div style="color:#ffffff;font-size:27px;font-weight:800;'
+             'letter-spacing:-0.5px;">Daily Digest</div>')
+    p.append('<div style="height:1px;background:rgba(255,255,255,0.15);'
+             'margin:18px 0 14px 0;"></div>')
+    line = today + ' (' + weekday + ')'
+    if person:
+        line = html.escape(person) + '　|　' + line
+    p.append('<div style="color:#a8c5e0;font-size:12px;">' + line + '</div>')
+    p.append('</td></tr>')
+
+    p.append('<tr><td style="height:20px;"></td></tr>')
+    if note:
+        p.append('<tr><td style="background-color:#fef9e7;border-radius:10px;'
+                 'padding:14px 20px;margin-bottom:16px;">')
+        p.append('<div style="font-size:12px;color:#92702a;line-height:1.7;">'
+                 '&#9432; ' + html.escape(note) + '</div>')
+        p.append('</td></tr>')
+        p.append('<tr><td style="height:16px;"></td></tr>')
+    p.append('<tr><td style="background-color:#ffffff;border-radius:14px;'
+             'padding:44px 32px;text-align:center;">')
+    p.append('<div style="font-size:38px;margin-bottom:18px;">&#127749;</div>')
+    p.append('<div style="font-size:18px;font-weight:700;color:#101f38;'
+             'margin-bottom:12px;">本日の新着記事はありません</div>')
+    p.append('<div style="font-size:13px;color:#6b7a90;line-height:1.9;">')
+    if reason:
+        p.append(html.escape(reason) + '<br>')
+    p.append('明日また最新情報をお届けします。')
+    p.append('</div>')
+    p.append('</td></tr>')
+
+    p.append('<tr><td style="padding:26px 28px 12px 28px;text-align:center;">')
+    p.append('<div style="height:1px;background-color:#dde3ec;margin-bottom:18px;"></div>')
+    p.append('<div style="color:#8b98ab;font-size:11px;line-height:1.9;">')
+    p.append('<span style="color:#a8b3c4;">Automated by GitHub Actions</span>')
+    p.append('</div>')
+    p.append('</td></tr>')
+
+    p.append('</table></td></tr></table></body></html>')
+    return "".join(p)
+
+
+def build_empty_text(member, reason=""):
+    today = datetime.now(JST).strftime("%Y/%m/%d")
+    person = member.get("name", "")
+    lines = []
+    head = "AdTech Daily Digest " + today
+    if person:
+        head = person + " さん向け " + head
+    lines.append(head)
+    lines.append("")
+    lines.append("本日の新着記事はありません。")
+    if reason:
+        lines.append(reason)
+    lines.append("")
+    lines.append("明日また最新情報をお届けします。")
+    return "\n".join(lines)
+
 
 def send_mail(to_email, html_body, text_body, person=""):
     gmail_user = os.environ["GMAIL_USER"]
@@ -747,18 +833,10 @@ def main():
 
     history = load_history()
 
-    arts_all = fetch_articles()
-    print("取得記事数: " + str(len(arts_all)))
+    arts_normal = fetch_articles(HOURS_BACK)
+    print("通常範囲(" + str(HOURS_BACK) + "h)の取得: " + str(len(arts_normal)) + "件")
 
-    if not arts_all:
-        for m in members:
-            send_mail(
-                m["email"],
-                "<html><body><p>本日は対象期間内の新着記事がありませんでした。</p></body></html>",
-                "本日は対象期間内の新着記事がありませんでした。",
-                m.get("name", ""),
-            )
-        return
+    arts_extended = None
 
     all_fb = load_all_feedback()
 
@@ -771,6 +849,7 @@ def main():
           + " / BAD " + str(total_bad))
 
     success = 0
+    empty_sent = 0
     history_changed = False
 
     for i, member in enumerate(members):
@@ -780,11 +859,38 @@ def main():
         print("===== 処理中: " + label + " =====")
 
         sent_map = history.get(name, {})
-        arts = filter_unsent(arts_all, sent_map)
+        arts = filter_unsent(arts_normal, sent_map)
+        note = ""
 
-        if len(arts) < 3:
-            print("[WARN] 未配信記事が少ないため履歴を無視します")
-            arts = arts_all
+        # 段階1: 通常範囲で不足なら範囲拡大
+        if len(arts) < MIN_ARTICLES:
+            print("[INFO] 未配信" + str(len(arts)) + "件。範囲を"
+                  + str(EXTENDED_HOURS) + "hに拡大して再取得します")
+
+            if arts_extended is None:
+                arts_extended = fetch_articles(EXTENDED_HOURS)
+                print("[INFO] 拡大範囲の取得: " + str(len(arts_extended)) + "件")
+
+            arts = filter_unsent(arts_extended, sent_map)
+            if arts:
+                note = "直近" + str(EXTENDED_HOURS) + "時間まで範囲を広げて収集しました。"
+
+        # 段階2: それでも0件なら空メール
+        if not arts:
+            print("[INFO] " + label + ": 未配信記事なし。空メールを送信します")
+            try:
+                send_mail(
+                    member["email"],
+                    build_empty_html(member, "収集対象の媒体に未読の新着記事がありませんでした。"),
+                    build_empty_text(member, "収集対象の媒体に未読の新着記事がありませんでした。"),
+                    name,
+                )
+                empty_sent += 1
+            except Exception as e:
+                print("[ERROR] 送信失敗: " + str(e))
+            if i < len(members) - 1:
+                time.sleep(5)
+            continue
 
         arts = cap_articles(arts)
 
@@ -806,8 +912,8 @@ def main():
             if not items:
                 raise RuntimeError("選定結果が空です")
 
-            html_body = build_html(items, arts, member)
-            text_body = build_text(items, arts, member)
+            html_body = build_html(items, arts, member, note)
+            text_body = build_text(items, arts, member, note)
 
         except Exception as e:
             print("[ERROR] 要約失敗: " + str(e))
@@ -833,7 +939,8 @@ def main():
         save_history(history)
 
     print("")
-    print("[DONE] " + str(success) + "/" + str(len(members)) + " 名に配信完了")
+    print("[DONE] 配信 " + str(success) + "件 / 空通知 " + str(empty_sent)
+          + "件 / 全" + str(len(members)) + "名")
 
 
 if __name__ == "__main__":
