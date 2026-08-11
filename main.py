@@ -44,10 +44,10 @@ FEEDS = {
     "unyoo.jp": "https://unyoo.jp/feed/",
 }
 
-MAX_PER_FEED = 5
+MAX_PER_FEED = 4
 HOURS_BACK = 30
 MAX_ARTICLES_IN_MAIL = 8
-MAX_TOTAL_ARTICLES = 80
+MAX_TOTAL_ARTICLES = 55
 MAX_FEEDBACK_ROWS = 200
 JST = timezone(timedelta(hours=9))
 
@@ -311,11 +311,12 @@ def build_preference_block(member, personal_fb, team_fb):
     return "\n".join(parts)
 
 
-def call_groq(prompt):
+def call_groq(prompt, max_tokens=5000):
     api_key = os.environ["GROQ_API_KEY"]
     last_error = None
+
     for model in GROQ_MODELS:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 payload = {
                     "model": model,
@@ -327,7 +328,7 @@ def call_groq(prompt):
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.3,
-                    "max_tokens": 5000,
+                    "max_tokens": max_tokens,
                     "response_format": {"type": "json_object"},
                 }
                 res = requests.post(
@@ -337,19 +338,72 @@ def call_groq(prompt):
                         "Content-Type": "application/json",
                     },
                     json=payload,
-                    timeout=150,
+                    timeout=180,
                 )
+
                 if res.status_code == 429:
-                    print("[WARN] " + model + " レート制限。25秒待機")
-                    time.sleep(25)
+                    wait = 30
+                    try:
+                        info = res.json()
+                        msg = str(info.get("error", {}).get("message", ""))
+                        m = re.search(r"try again in ([\d.]+)s", msg)
+                        if m:
+                            wait = int(float(m.group(1))) + 5
+                    except Exception:
+                        pass
+                    wait = min(wait, 90)
+                    print("[WARN] " + model + " 429。" + str(wait) + "秒待機")
+                    time.sleep(wait)
                     continue
+
+                if res.status_code == 413:
+                    print("[WARN] " + model + " 入力過大。次モデルへ")
+                    break
+
                 res.raise_for_status()
-                return res.json()["choices"][0]["message"]["content"]
+                content = res.json()["choices"][0]["message"]["content"]
+                print("[OK] LLM応答取得: " + model)
+                return content
+
+            except requests.exceptions.Timeout:
+                last_error = "Timeout"
+                print("[WARN] " + model + " タイムアウト 試行" + str(attempt + 1))
+                time.sleep(10)
             except Exception as e:
                 last_error = e
-                print("[WARN] " + model + " 試行" + str(attempt + 1) + ": " + type(e).__name__)
-                time.sleep(5)
+                print("[WARN] " + model + " 試行" + str(attempt + 1)
+                      + ": " + type(e).__name__ + " " + str(e)[:150])
+                time.sleep(8)
+
     raise RuntimeError("全モデル失敗: " + str(last_error))
+
+
+def parse_json_safely(raw):
+    """LLMの出力からJSONを抽出"""
+    if not raw:
+        raise ValueError("空の応答")
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(raw[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError("JSON解析失敗: " + raw[:200])
 
 
 def select_and_summarize(articles, preference):
@@ -357,7 +411,7 @@ def select_and_summarize(articles, preference):
     for i, a in enumerate(articles):
         blocks.append(
             "ID:" + str(i) + "\n媒体:" + a["source"] + "\n原題:" + a["title"]
-            + "\n概要:" + a["summary"]
+            + "\n概要:" + a["summary"][:300]
         )
     indexed = "\n\n".join(blocks)
 
@@ -368,7 +422,7 @@ def select_and_summarize(articles, preference):
         + preference
         + """
 # 出力形式
-以下のJSON形式のみを出力してください。説明文は不要です。
+以下のJSON形式のみを出力してください。前置きや説明文は不要です。
 
 {
   "articles": [
@@ -393,11 +447,12 @@ def select_and_summarize(articles, preference):
 - セミナー、ウェビナー告知、イベント案内
 - 人事異動、組織改編
 - 単なる製品リリース告知
+- 個別ブランドのキャンペーン事例
 - 広告業界と関連の薄い一般テックニュース
 
 # 記述ルール
-- summary は「〜について報じられた」のような内容の薄い表現を禁止。必ず具体的な事実を書く
-- insight は「AIの活用による効率化」のような一般論を禁止。実務上何が変わるかを書く
+- summary は「〜について報じられた」のような内容の薄い表現を禁止
+- insight は「AIの活用による効率化」のような一般論を禁止
 - 専門用語は原語のまま（SSP, DSP, PMP, CDP, CTV など）
 - 同一の出来事を複数媒体が報じている場合は1件にまとめる
 
@@ -407,8 +462,24 @@ def select_and_summarize(articles, preference):
     )
 
     raw = call_groq(prompt)
-    data = json.loads(raw)
-    return data.get("articles", [])
+    data = parse_json_safely(raw)
+
+    items = data.get("articles", [])
+    if not isinstance(items, list):
+        raise ValueError("articles が配列ではありません")
+
+    valid = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        idx = it.get("id")
+        if isinstance(idx, str) and idx.isdigit():
+            idx = int(idx)
+            it["id"] = idx
+        if isinstance(idx, int) and 0 <= idx < len(articles):
+            valid.append(it)
+
+    return valid
 
 
 def form_urls(title, person_name):
@@ -665,7 +736,8 @@ def main():
             print("[ERROR] 送信失敗 " + member["email"] + ": " + str(e))
 
         if i < len(members) - 1:
-            time.sleep(10)
+            print("[INFO] 次のメンバーまで35秒待機")
+            time.sleep(35)
 
     print("")
     print("[DONE] " + str(success) + "/" + str(len(members)) + " 名に配信完了")
