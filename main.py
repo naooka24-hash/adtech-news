@@ -49,6 +49,8 @@ HOURS_BACK = 30
 MAX_ARTICLES_IN_MAIL = 8
 MAX_TOTAL_ARTICLES = 55
 MAX_FEEDBACK_ROWS = 200
+HISTORY_FILE = "sent_history.json"
+HISTORY_DAYS = 14
 JST = timezone(timedelta(hours=9))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -93,6 +95,76 @@ def normalize_url(url):
 
 
 def load_members():
+    def load_history():
+    """配信済み履歴を読み込み、古いものを削除"""
+    try:
+        with open(HISTORY_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print("[INFO] 履歴ファイルなし。新規作成します")
+        return {}
+    except Exception as e:
+        print("[WARN] 履歴読込失敗: " + str(e))
+        return {}
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
+    cleaned = {}
+    for person, records in data.items():
+        if not isinstance(records, dict):
+            continue
+        kept = {}
+        for url_key, date_str in records.items():
+            if str(date_str) >= cutoff:
+                kept[url_key] = date_str
+        cleaned[person] = kept
+        print("[OK] 履歴 " + person + ": " + str(len(kept)) + "件")
+
+    return cleaned
+
+
+def save_history(history):
+    """履歴をファイルに保存"""
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=1, sort_keys=True)
+        total = sum(len(v) for v in history.values())
+        print("[OK] 履歴保存: 全" + str(total) + "件")
+        return True
+    except Exception as e:
+        print("[ERROR] 履歴保存失敗: " + str(e))
+        return False
+
+
+def filter_unsent(articles, sent_map):
+    """未配信の記事のみ抽出"""
+    if not sent_map:
+        return articles
+    result = []
+    for a in articles:
+        key = normalize_url(a["link"])
+        if key not in sent_map:
+            result.append(a)
+    removed = len(articles) - len(result)
+    if removed > 0:
+        print("[INFO] 配信済み " + str(removed) + "件を除外 -> 残り" + str(len(result)) + "件")
+    return result
+
+
+def record_sent(history, person, articles, items):
+    """配信した記事を履歴に追加"""
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    if person not in history:
+        history[person] = {}
+    count = 0
+    for item in items:
+        idx = item.get("id")
+        if not isinstance(idx, int) or idx < 0 or idx >= len(articles):
+            continue
+        key = normalize_url(articles[idx]["link"])
+        history[person][key] = today
+        count += 1
+    return count
+    
     try:
         with open("members.json", encoding="utf-8") as f:
             data = json.load(f)
@@ -673,10 +745,12 @@ def main():
         print("[ERROR] 配信先が設定されていません")
         return
 
-    arts = fetch_articles()
-    print("取得記事数: " + str(len(arts)))
+    history = load_history()
 
-    if not arts:
+    arts_all = fetch_articles()
+    print("取得記事数: " + str(len(arts_all)))
+
+    if not arts_all:
         for m in members:
             send_mail(
                 m["email"],
@@ -686,7 +760,6 @@ def main():
             )
         return
 
-    arts = cap_articles(arts)
     all_fb = load_all_feedback()
 
     total_good = 0
@@ -698,11 +771,22 @@ def main():
           + " / BAD " + str(total_bad))
 
     success = 0
+    history_changed = False
+
     for i, member in enumerate(members):
         name = member.get("name", "")
         label = name if name else member["email"]
         print("")
         print("===== 処理中: " + label + " =====")
+
+        sent_map = history.get(name, {})
+        arts = filter_unsent(arts_all, sent_map)
+
+        if len(arts) < 3:
+            print("[WARN] 未配信記事が少ないため履歴を無視します")
+            arts = arts_all
+
+        arts = cap_articles(arts)
 
         personal_fb = all_fb.get(name, {"good": [], "bad": []})
         team_fb = build_team_feedback(all_fb, name)
@@ -714,6 +798,7 @@ def main():
 
         pref = build_preference_block(member, personal_fb, team_fb)
 
+        items = []
         try:
             items = select_and_summarize(arts, pref)
             print("[OK] 選定記事数: " + str(len(items)))
@@ -728,16 +813,24 @@ def main():
             print("[ERROR] 要約失敗: " + str(e))
             html_body = build_fallback_html(arts)
             text_body = build_fallback_text(arts)
+            items = []
 
         try:
             send_mail(member["email"], html_body, text_body, name)
             success += 1
+            if items:
+                n = record_sent(history, name, arts, items)
+                history_changed = True
+                print("[OK] 履歴に" + str(n) + "件を記録")
         except Exception as e:
             print("[ERROR] 送信失敗 " + member["email"] + ": " + str(e))
 
         if i < len(members) - 1:
             print("[INFO] 次のメンバーまで35秒待機")
             time.sleep(35)
+
+    if history_changed:
+        save_history(history)
 
     print("")
     print("[DONE] " + str(success) + "/" + str(len(members)) + " 名に配信完了")
