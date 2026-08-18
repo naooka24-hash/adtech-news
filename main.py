@@ -42,7 +42,7 @@ FEEDS = {
 MAX_PER_FEED = 4
 HOURS_BACK = 30
 MAX_ARTICLES_IN_MAIL = 8
-MAX_TOTAL_ARTICLES = 50
+MAX_TOTAL_ARTICLES = 30
 MAX_FEEDBACK_ROWS = 200
 HISTORY_FILE = "sent_history.json"
 HISTORY_DAYS = 14
@@ -601,20 +601,20 @@ TAG_LIST = [
 ]
 
 
-def summarize_common(articles):
-    """全員共通の要約を1回だけ生成"""
+def summarize_batch(articles, id_offset, want_count):
+    """1バッチ分を要約"""
     blocks = []
     for i, a in enumerate(articles):
         blocks.append(
-            "ID:" + str(i) + " [" + a["source"] + "] " + a["title"]
-            + "\n" + a["summary"][:200]
+            "ID:" + str(i + id_offset) + " [" + a["source"] + "] " + a["title"][:100]
+            + "\n" + a["summary"][:100]
         )
     indexed = "\n\n".join(blocks)
 
     prompt = (
         "以下はアドテク・デジタルマーケティング業界の最新記事一覧です。\n"
-        "日本の広告事業従事者にとって重要度が高いものを"
-        + str(SUMMARIZE_COUNT) + "件選び、日本語で要約してください。\n"
+        "日本の広告事業従事者にとって重要度が高いものを最大"
+        + str(want_count) + "件選び、日本語で要約してください。\n"
         + """
 # 出力形式
 以下のJSON形式のみを出力してください。前置きや説明は不要です。
@@ -633,20 +633,12 @@ def summarize_common(articles):
 }
 
 # 使用可能なタグ
-privacy     : プライバシー規制、Cookie、同意管理、アイデンティティ
-platform    : Google/Meta/Amazon/TikTok等の広告仕様変更
-ctv         : CTV、ストリーミング、動画広告
-retail      : リテールメディア、コマース広告
-ma          : M&A、資金調達、業績、倒産
-measurement : 計測、アトリビューション、ブランドセーフティ、アドフラウド
-ai          : 生成AIの広告領域への実装
-agency      : 代理店動向、業界構造の変化
-japan       : 日本国内市場の動向
-search      : 検索広告、SEO、SGE
+privacy, platform, ctv, retail, ma, measurement, ai, agency, japan, search
 
 # 選定基準
-上記タグに該当する記事を優先。
-セミナー告知、人事異動、個別ブランドのキャンペーン事例は除外。
+プライバシー規制、大手プラットフォームの仕様変更、CTV、リテールメディア、
+M&A、計測技術、生成AIの広告実装を優先。
+セミナー告知、人事異動、個別キャンペーン事例は除外。
 
 # 記述ルール
 - summary は「〜について報じられた」等の空虚な表現を禁止
@@ -658,12 +650,36 @@ search      : 検索広告、SEO、SGE
         + indexed
     )
 
-    raw = call_groq(prompt, max_tokens=6000)
+    raw = call_groq(prompt, max_tokens=4000)
     data = parse_json_safely(raw)
-    items = data.get("articles", [])
+    return data.get("articles", [])
+
+
+def summarize_common(articles):
+    """バッチに分けて要約"""
+    batch_size = 15
+    total = len(articles)
+    batches = (total + batch_size - 1) // batch_size
+    per_batch = max(4, SUMMARIZE_COUNT // max(batches, 1) + 2)
+
+    raw_items = []
+    for bi in range(batches):
+        start = bi * batch_size
+        chunk = articles[start:start + batch_size]
+        print("[INFO] 要約バッチ " + str(bi + 1) + "/" + str(batches)
+              + " (" + str(len(chunk)) + "件)")
+        try:
+            res = summarize_batch(chunk, start, per_batch)
+            raw_items.extend(res)
+            print("[OK] バッチ" + str(bi + 1) + ": " + str(len(res)) + "件")
+        except Exception as e:
+            print("[WARN] バッチ" + str(bi + 1) + "失敗: " + str(e)[:120])
+
+        if bi < batches - 1:
+            time.sleep(20)
 
     valid = []
-    for it in items:
+    for it in raw_items:
         if not isinstance(it, dict):
             continue
         idx = it.get("id")
