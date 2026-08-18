@@ -54,8 +54,20 @@ JST = timezone(timedelta(hours=9))
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
+PROVIDERS = [
+    {
+        "name": "Cerebras",
+        "url": "https://api.cerebras.ai/v1/chat/completions",
+        "key_env": "CEREBRAS_API_KEY",
+        "models": ["llama-3.3-70b", "llama3.1-8b"],
+    },
+    {
+        "name": "Groq",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "key_env": "GROQ_API_KEY",
+        "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"],
+    },
+]
 
 EXCLUDE_KEYWORDS = [
     "hires", "promotes", "appoints", "joins ", "names ", "steps down",
@@ -454,92 +466,97 @@ def build_preference_block(member, personal_fb, team_fb):
 
 
 def call_groq(prompt, max_tokens=5000):
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY が未設定です")
+    """複数プロバイダを順に試行。関数名は互換のため維持"""
+    last_error = "利用可能なプロバイダがありません"
+    tried = 0
 
-    last_error = None
+    for prov in PROVIDERS:
+        api_key = os.environ.get(prov["key_env"], "")
+        if not api_key:
+            print("[INFO] " + prov["name"] + " のキー未設定。スキップ")
+            continue
 
-    for model in GROQ_MODELS:
-        for attempt in range(3):
-            try:
-                payload = {
-                    "model": model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "あなたは日本の広告業界に精通したアナリストです。必ず日本語で、指定されたJSON形式のみを出力します。",
+        for model in prov["models"]:
+            for attempt in range(2):
+                tried += 1
+                try:
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "あなたは日本の広告業界に精通したアナリストです。必ず日本語で、指定されたJSON形式のみを出力します。",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": max_tokens,
+                        "response_format": {"type": "json_object"},
+                    }
+                    res = requests.post(
+                        prov["url"],
+                        headers={
+                            "Authorization": "Bearer " + api_key,
+                            "Content-Type": "application/json",
                         },
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": max_tokens,
-                    "response_format": {"type": "json_object"},
-                }
-                res = requests.post(
-                    GROQ_URL,
-                    headers={
-                        "Authorization": "Bearer " + api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=180,
-                )
+                        json=payload,
+                        timeout=180,
+                    )
 
-                if res.status_code == 404:
-                    detail = ""
-                    try:
-                        detail = str(res.json())[:200]
-                    except Exception:
-                        detail = res.text[:200]
-                    print("[WARN] " + model + " 404 (モデル未提供): " + detail)
-                    break
+                    if res.status_code == 404:
+                        print("[WARN] " + prov["name"] + "/" + model
+                              + " モデル未提供。次へ")
+                        break
 
-                if res.status_code == 401:
-                    print("[ERROR] APIキーが無効です")
-                    raise RuntimeError("APIキー認証エラー")
+                    if res.status_code == 401:
+                        print("[WARN] " + prov["name"] + " APIキーが無効。次のプロバイダへ")
+                        last_error = prov["name"] + " 認証エラー"
+                        break
 
-                if res.status_code == 429:
-                    wait = 40
-                    try:
-                        msg = str(res.json().get("error", {}).get("message", ""))
-                        m = re.search(r"try again in ([\d.]+)s", msg)
-                        if m:
-                            wait = int(float(m.group(1))) + 5
-                    except Exception:
-                        pass
-                    wait = min(max(wait, 25), 120)
-                    print("[WARN] " + model + " 429。" + str(wait) + "秒待機")
-                    time.sleep(wait)
-                    continue
+                    if res.status_code == 429:
+                        wait = 25
+                        try:
+                            msg = str(res.json().get("error", {}).get("message", ""))
+                            m = re.search(r"try again in ([\d.]+)s", msg)
+                            if m:
+                                wait = int(float(m.group(1))) + 3
+                        except Exception:
+                            pass
+                        wait = min(max(wait, 15), 60)
+                        if attempt == 0:
+                            print("[WARN] " + prov["name"] + "/" + model
+                                  + " 429。" + str(wait) + "秒待機")
+                            time.sleep(wait)
+                            continue
+                        print("[WARN] " + prov["name"] + "/" + model
+                              + " 429継続。次へ")
+                        break
 
-                if res.status_code in (400, 413):
-                    detail = ""
-                    try:
-                        detail = str(res.json())[:200]
-                    except Exception:
-                        pass
-                    print("[WARN] " + model + " " + str(res.status_code)
-                          + ": " + detail)
-                    break
+                    if res.status_code in (400, 413):
+                        detail = ""
+                        try:
+                            detail = str(res.json())[:150]
+                        except Exception:
+                            pass
+                        print("[WARN] " + prov["name"] + "/" + model + " "
+                              + str(res.status_code) + ": " + detail)
+                        break
 
-                res.raise_for_status()
-                print("[OK] LLM応答取得: " + model)
-                return res.json()["choices"][0]["message"]["content"]
+                    res.raise_for_status()
+                    print("[OK] LLM応答: " + prov["name"] + "/" + model)
+                    return res.json()["choices"][0]["message"]["content"]
 
-            except requests.exceptions.Timeout:
-                last_error = "Timeout"
-                print("[WARN] " + model + " タイムアウト")
-                time.sleep(8)
-            except RuntimeError:
-                raise
-            except Exception as e:
-                last_error = str(e)[:150]
-                print("[WARN] " + model + ": " + type(e).__name__
-                      + " " + str(e)[:120])
-                time.sleep(6)
+                except requests.exceptions.Timeout:
+                    last_error = "Timeout"
+                    print("[WARN] " + prov["name"] + "/" + model + " タイムアウト")
+                    time.sleep(6)
+                except Exception as e:
+                    last_error = str(e)[:150]
+                    print("[WARN] " + prov["name"] + "/" + model + ": "
+                          + type(e).__name__)
+                    time.sleep(5)
 
-    raise RuntimeError("全モデル失敗: " + str(last_error))
+    raise RuntimeError("全プロバイダ失敗 (試行" + str(tried) + "回): " + str(last_error))
 
 
 def parse_json_safely(raw):
