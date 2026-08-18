@@ -39,7 +39,7 @@ FEEDS = {
     "Netインフォメーション": "https://internet.watch.impress.co.jp/data/rss/1.0/iw/feed.rdf",
 }
 
-MAX_PER_FEED = 4
+MAX_PER_FEED = 3
 HOURS_BACK = 30
 MAX_ARTICLES_IN_MAIL = 8
 MAX_TOTAL_ARTICLES = 30
@@ -48,7 +48,7 @@ HISTORY_FILE = "sent_history.json"
 HISTORY_DAYS = 14
 EXTENDED_HOURS = 96
 MIN_ARTICLES = 3
-SUMMARIZE_COUNT = 14
+SUMMARIZE_COUNT = 12
 JST = timezone(timedelta(hours=9))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -59,7 +59,7 @@ PROVIDERS = [
         "name": "Cerebras",
         "url": "https://api.cerebras.ai/v1/chat/completions",
         "key_env": "CEREBRAS_API_KEY",
-        "models": ["llama-3.3-70b", "llama3.1-8b"],
+        "models": ["gpt-oss-120b", "gemma-4-31b"],
     },
     {
         "name": "Groq",
@@ -660,12 +660,16 @@ def summarize_common(articles):
     batch_size = 15
     total = len(articles)
     batches = (total + batch_size - 1) // batch_size
-    per_batch = max(4, SUMMARIZE_COUNT // max(batches, 1) + 2)
+    if batches < 1:
+        batches = 1
+    per_batch = max(4, SUMMARIZE_COUNT // batches + 2)
 
     raw_items = []
     for bi in range(batches):
         start = bi * batch_size
         chunk = articles[start:start + batch_size]
+        if not chunk:
+            continue
         print("[INFO] 要約バッチ " + str(bi + 1) + "/" + str(batches)
               + " (" + str(len(chunk)) + "件)")
         try:
